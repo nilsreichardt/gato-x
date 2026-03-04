@@ -163,6 +163,53 @@ async def test_cli_old_token(mock_enumerator, capfd):
     mock_instance.enumerate_organization.assert_called_once_with("test")
 
 
+@mock.patch("gatox.cli.cli.Enumerator")
+async def test_cli_token_pool_classic(mock_enumerator, capfd):
+    """Test that comma-separated classic tokens are accepted."""
+    os.environ["GH_TOKEN"] = (
+        "gho_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,"
+        "gho_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    )
+
+    mock_instance = mock_enumerator.return_value
+    mock_instance.api = mock.MagicMock()
+    mock_instance.api.check_user = AsyncMock(
+        return_value={
+            "user": "testUser",
+            "scopes": ["repo", "workflow"],
+        }
+    )
+    mock_instance.api.get_user_type = AsyncMock(return_value="Organization")
+    mock_instance.enumerate_organization = AsyncMock(return_value={"testOrg": "data"})
+    mock_instance.user_perms = {"user": "testUser", "scopes": ["repo", "workflow"]}
+
+    await cli.cli(["enumerate", "-t", "test"])
+
+    mock_enumerator.assert_called_once_with(
+        "gho_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,"
+        "gho_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        socks_proxy=None,
+        http_proxy=None,
+        skip_log=False,
+        github_url=None,
+        ignore_workflow_run=False,
+    )
+
+
+async def test_cli_mixed_token_pool_invalid(capfd):
+    """Test that mixed token types in a token pool are rejected."""
+    os.environ["GH_TOKEN"] = (
+        "gho_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,"
+        "ghs_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    )
+
+    with pytest.raises(SystemExit):
+        await cli.cli(["enumerate", "-t", "test"])
+
+    _, err = capfd.readouterr()
+    assert "Mixed GitHub token types" in err
+
+
 async def test_cli_invalid_pat(capfd):
     """Test case where a clearly invalid PAT is provided."""
     os.environ["GH_TOKEN"] = "invalid"

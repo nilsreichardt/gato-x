@@ -24,6 +24,26 @@ def test_initialize():
     assert abstraction_layer.verify_ssl is True
 
 
+def test_initialize_token_pool():
+    """Test initialization with a comma-separated token pool."""
+    test_pat = (
+        "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,"
+        "ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    )
+
+    abstraction_layer = Api(test_pat, "2022-11-28")
+
+    assert abstraction_layer.tokens == [
+        "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    ]
+    assert abstraction_layer.pat == "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    assert (
+        abstraction_layer.token_resets["ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"]
+        is None
+    )
+
+
 def test_socks():
     """Test that we can successfully configure a SOCKS proxy."""
     test_pat = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -62,6 +82,51 @@ async def test_user_scopes():
 
     assert user_info["user"] == "TestUserName"
     assert "repo" in user_info["scopes"]
+
+
+async def test_call_get_rotates_token_pool_on_rate_limit():
+    """Test that blocked requests rotate to the next token in the pool."""
+    test_pat = (
+        "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,"
+        "ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    )
+    mock_client = AsyncMock()
+
+    rate_limited_response = MagicMock()
+    rate_limited_response.status_code = 403
+    rate_limited_response.headers = {
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Reset": "1893456000",
+    }
+    rate_limited_response.text = "API rate limit exceeded"
+
+    success_response = MagicMock()
+    success_response.status_code = 200
+    success_response.headers = {}
+    success_response.text = ""
+
+    mock_client.get.side_effect = [rate_limited_response, success_response]
+
+    abstraction_layer = Api(test_pat, "2022-11-28", client=mock_client)
+    response = await abstraction_layer.call_get("/user")
+
+    assert response is success_response
+    assert abstraction_layer.pat == "ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    assert (
+        abstraction_layer.token_resets["ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
+        == 1893456000
+    )
+
+    first_headers = mock_client.get.await_args_list[0].kwargs["headers"]
+    second_headers = mock_client.get.await_args_list[1].kwargs["headers"]
+    assert (
+        first_headers["Authorization"]
+        == "Bearer ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    )
+    assert (
+        second_headers["Authorization"]
+        == "Bearer ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    )
 
 
 def test_socks_and_http():

@@ -48,7 +48,7 @@ To use the Gato-X MCP server with an MCP-compatible agent (such as Copilot Works
 ```
 
 - Replace `/path/to/python` with the path to your Python interpreter (e.g., from your virtual environment).
-- Set the `GH_TOKEN` environment variable to your GitHub Personal Access Token (PAT) with the required scopes.
+- Set the `GH_TOKEN` environment variable to your GitHub Personal Access Token (PAT) with the required scopes. `GH_TOKEN` may also be a comma-separated list of tokens, which Gato-X will treat as a token pool for rate-limit failover.
 
 **Tip:** For better security, set `GH_TOKEN` as an environment variable in your shell instead of hardcoding it in the config file.
 

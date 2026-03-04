@@ -27,6 +27,24 @@ from gatox.search.search import Searcher
 from gatox.util.arg_utils import read_file_and_validate_lines
 
 
+def split_github_tokens(gh_token: str) -> list[str]:
+    """Split a potentially comma-separated GH_TOKEN value into tokens."""
+    return [token.strip() for token in gh_token.split(",") if token.strip()]
+
+
+def classify_github_token(token: str) -> str | None:
+    """Classify a GitHub token by format."""
+    if re.match(r"github_pat_[A-Za-z0-9_]{22}_[A-Za-z0-9_]{59}$", token):
+        return "fine_grained"
+    if re.match(r"gh[s]_[A-Za-z0-9]{36}$", token):
+        return "app"
+    if re.match(r"gh[po]_[A-Za-z0-9]{36}$", token) or re.match(
+        r"^[a-fA-F0-9]{40}$", token
+    ):
+        return "classic"
+    return None
+
+
 async def cli(args):
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawTextHelpFormatter,
@@ -137,25 +155,32 @@ def validate_arguments(args, parser):
         else:
             gh_token = os.environ["GH_TOKEN"]
 
-        if re.match(r"github_pat_[A-Za-z0-9_]{22}_[A-Za-z0-9_]{59}$", gh_token):
+        token_pool = split_github_tokens(gh_token)
+        token_types = {classify_github_token(token) for token in token_pool}
+
+        if None in token_types:
+            parser.error(
+                f"{Fore.RED}[!]{Style.RESET_ALL} Provided GitHub PAT is malformed or unsupported!"
+            )
+
+        if len(token_types) > 1:
+            parser.error(
+                f"{Fore.RED}[!]{Style.RESET_ALL} Mixed GitHub token types in GH_TOKEN are not supported!"
+            )
+
+        token_type = token_types.pop()
+
+        if token_type == "fine_grained":
             logging.info("Using fine-grained token.")
-        elif not (
-            re.match("gh[po]_[A-Za-z0-9]{36}$", gh_token)
-            or re.match("^[a-fA-F0-9]{40}$", gh_token)
-        ):
-            if re.match("gh[s]_[A-Za-z0-9]{36}$", gh_token):
-                if not (args.machine and args.repository):
-                    parser.error(
-                        f"{Fore.RED}[!]{Style.RESET_ALL} Gato-X does"
-                        " not support App tokens without machine flag."
-                    )
-                else:
-                    Output.info(
-                        "Allowing the use of a GitHub App token for single repo enumeration."
-                    )
-            else:
+        elif token_type == "app":
+            if not (args.machine and args.repository):
                 parser.error(
-                    f"{Fore.RED}[!]{Style.RESET_ALL} Provided GitHub PAT is malformed or unsupported!"
+                    f"{Fore.RED}[!]{Style.RESET_ALL} Gato-X does"
+                    " not support App tokens without machine flag."
+                )
+            else:
+                Output.info(
+                    "Allowing the use of a GitHub App token for single repo enumeration."
                 )
 
     args_dict = vars(args)
@@ -293,7 +318,7 @@ async def attack(args, parser):
         )
     elif args.secrets:
         scopes = None
-        if args.gh_token.startswith("github_pat_"):
+        if split_github_tokens(args.gh_token)[0].startswith("github_pat_"):
             gh_enumeration_runner = FineGrainedEnumerator(
                 pat=args.gh_token,
                 socks_proxy=args.socks_proxy,
@@ -470,7 +495,7 @@ async def enumerate(args, parser):
         LocalCacheFactory.load_cache_from_file(args.cache_restore_file)
         Output.info(f"Cache restored from file:{args.cache_restore_file}")
 
-    if "github_pat" in args.gh_token:
+    if split_github_tokens(args.gh_token)[0].startswith("github_pat_"):
         await enumerate_finegrained(args, parser)
     else:
         await enumerate_classic(args, parser)

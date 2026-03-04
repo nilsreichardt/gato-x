@@ -57,6 +57,14 @@ After creating this token, set the `GH_TOKEN` environment variable within your s
 export GH_TOKEN=<YOUR_CREATED_TOKEN>
 ```
 
+You can also provide multiple comma-separated tokens:
+
+```bash
+export GH_TOKEN=<TOKEN_ONE>,<TOKEN_TWO>,<TOKEN_THREE>
+```
+
+When one token is rate-limited, Gato-X will switch to the next available token and resume using the blocked token after its `X-RateLimit-Reset` time passes.
+
 Alternatively, you can enter it when the application prompts you.
 
 ## Verifying Installation

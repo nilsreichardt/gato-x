@@ -6,6 +6,7 @@ import logging
 import re
 import zipfile
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import httpx
 
@@ -27,6 +28,7 @@ class Api:
     MACHINE_RE = re.compile(r"Machine name: \'([\w+-.]+)\'")
     RUNNERGROUP_RE = re.compile(r"Runner group name: \'([\w+-.]+)\'")
     RUNNERTYPE_RE = re.compile(r"([\w+-.]+)")
+    RATE_LIMIT_STATUS_CODES = {403, 429}
 
     RUN_THRESHOLD = 90
 
@@ -53,14 +55,17 @@ class Api:
             socks_proxy (str, optional): SOCKS Proxy to use for API calls.
             Defaults to None.
         """
-        self.pat = pat
+        self.tokens = self.__parse_tokens(pat)
+        self.token_resets = dict.fromkeys(self.tokens)
+        self.active_token_index = 0
+        self.pat = self.tokens[self.active_token_index]
         self.transport = None
         self.verify_ssl = True
-        self.headers = {
+        self.base_headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {pat}",
             "X-GitHub-Api-Version": version,
         }
+        self.headers = self.__build_headers()
         if not github_url:
             self.github_url = "https://api.github.com"
         else:
@@ -96,6 +101,184 @@ class Api:
             )
         self.app_permissions = app_permissions
 
+    @staticmethod
+    def __parse_tokens(pat: str | list[str] | tuple[str, ...]) -> list[str]:
+        """Return a normalized list of tokens from a string or sequence."""
+        if isinstance(pat, str):
+            tokens = [token.strip() for token in pat.split(",")]
+        else:
+            tokens = [token.strip() for token in pat]
+
+        tokens = [token for token in tokens if token]
+        if not tokens:
+            raise ValueError("At least one valid GitHub token must be provided!")
+
+        return tokens
+
+    def __build_headers(self, token: str = None, strip_auth: bool = False) -> dict:
+        """Construct request headers for the active token."""
+        headers = copy.deepcopy(self.base_headers)
+        if not strip_auth:
+            headers["Authorization"] = f"Bearer {token or self.pat}"
+        return headers
+
+    @staticmethod
+    def __parse_reset_timestamp(headers: Any) -> int | None:
+        """Read a rate-limit reset timestamp from response headers."""
+        reset_at = headers.get("X-RateLimit-Reset")
+        if not reset_at:
+            return None
+
+        try:
+            return int(reset_at)
+        except (TypeError, ValueError):
+            return None
+
+    def __set_active_token(self, index: int):
+        """Switch the active token and keep derived headers in sync."""
+        self.active_token_index = index
+        self.pat = self.tokens[index]
+        self.headers = self.__build_headers()
+
+    def __clear_expired_resets(self):
+        """Clear tokens whose reset time has already passed."""
+        now = datetime.now(timezone.utc).timestamp()
+        for token, reset_at in self.token_resets.items():
+            if reset_at is not None and reset_at <= now:
+                self.token_resets[token] = None
+
+    def __get_next_available_token_index(self) -> int | None:
+        """Find the next token in the pool that is currently usable."""
+        self.__clear_expired_resets()
+        token_count = len(self.tokens)
+        if token_count == 1:
+            return 0 if self.token_resets[self.pat] is None else None
+
+        for offset in range(1, token_count + 1):
+            candidate_index = (self.active_token_index + offset) % token_count
+            candidate = self.tokens[candidate_index]
+            if self.token_resets[candidate] is None:
+                return candidate_index
+
+        return None
+
+    async def __wait_for_available_token(self):
+        """Sleep until the earliest token reset has passed."""
+        self.__clear_expired_resets()
+        available_index = self.__get_next_available_token_index()
+        if available_index is not None:
+            self.__set_active_token(available_index)
+            return
+
+        reset_times = [
+            reset for reset in self.token_resets.values() if reset is not None
+        ]
+        if not reset_times:
+            return
+
+        next_reset = min(reset_times)
+        sleep_time = max(
+            0,
+            int(next_reset - datetime.now(timezone.utc).timestamp()) + 1,
+        )
+        sleep_time_mins = str(sleep_time // 60)
+
+        Output.warn(
+            f"Sleeping for {Output.bright(sleep_time_mins + ' minutes')} "
+            "until a GitHub token rate limit resets!"
+        )
+        await asyncio.sleep(sleep_time)
+        self.__clear_expired_resets()
+
+        available_index = self.__get_next_available_token_index()
+        if available_index is not None:
+            self.__set_active_token(available_index)
+
+    def __is_rate_limited_response(self, response: httpx.Response) -> bool:
+        """Return whether GitHub blocked this request due to rate limiting."""
+        if response.status_code not in self.RATE_LIMIT_STATUS_CODES:
+            return False
+
+        remaining = response.headers.get("X-RateLimit-Remaining")
+        if (
+            remaining == "0"
+            and self.__parse_reset_timestamp(response.headers) is not None
+        ):
+            return True
+
+        response_text = getattr(response, "text", "")
+        if isinstance(response_text, str):
+            return "rate limit" in response_text.lower()
+        return False
+
+    async def __handle_rate_limited_response(self, response: httpx.Response) -> bool:
+        """Handle a blocked request by rotating to another token or waiting."""
+        if not self.__is_rate_limited_response(response):
+            return False
+
+        reset_at = self.__parse_reset_timestamp(response.headers)
+        if reset_at is not None:
+            self.token_resets[self.pat] = reset_at
+
+        next_token_index = self.__get_next_available_token_index()
+        if next_token_index is not None:
+            blocked_token = self.pat
+            self.__set_active_token(next_token_index)
+            logger.warning(
+                "GitHub token hit a rate limit, switching tokens.",
+                extra={
+                    "blocked_token_suffix": blocked_token[-4:],
+                    "active_token_suffix": self.pat[-4:],
+                    "reset_at": reset_at,
+                },
+            )
+        else:
+            await self.__wait_for_available_token()
+
+        return True
+
+    async def __perform_request(
+        self,
+        method: str,
+        request_url: str,
+        strip_auth: bool = False,
+        **request_kwargs,
+    ) -> httpx.Response:
+        """Execute an HTTP request with token-pool rotation and retries."""
+        request_method = getattr(self.client, method.lower())
+        attempts = 0
+
+        while attempts < 5 + len(self.tokens):
+            attempts += 1
+            if not strip_auth and self.token_resets[self.pat] is not None:
+                await self.__wait_for_available_token()
+
+            try:
+                logger.debug(f"Making {method} API request to {request_url}!")
+                response = await request_method(
+                    request_url,
+                    headers=self.__build_headers(strip_auth=strip_auth),
+                    **request_kwargs,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"{method} request {request_url} failed due to transport error re-trying",
+                    exc_info=e,
+                )
+                continue
+
+            if not strip_auth and await self.__handle_rate_limited_response(response):
+                continue
+
+            if not strip_auth:
+                await self.__check_rate_limit(response.headers)
+
+            return response
+
+        raise Exception(
+            f"{method} request {request_url} failed after {attempts} attempts"
+        )
+
     async def __aenter__(self):
         return self
 
@@ -110,6 +293,9 @@ class Api:
         """Checks the rate limit, and pauses Gato execution until the rate
         limit resets.
         """
+        if len(self.tokens) > 1:
+            return
+
         if (
             "X-Ratelimit-Remaining" in headers
             and int(headers["X-Ratelimit-Remaining"])
@@ -319,37 +505,9 @@ class Api:
             Response: Returns the requests response object.
         """
         request_url = self.github_url + url
-
-        get_header = copy.deepcopy(self.headers)
-        if strip_auth:
-            del get_header["Authorization"]
-
-        api_response = None
-        for _ in range(0, 5):
-            try:
-                logger.debug(f"Making GET API request to {request_url}!")
-
-                api_response = await self.client.get(
-                    request_url,
-                    params=params,
-                    headers=get_header,
-                )
-
-                break
-            except Exception as e:
-                logger.warning(
-                    f"GET request {request_url} failed due to transport error re-trying",
-                    exc_info=e,
-                )
-                continue
-
-        if api_response is None:
-            raise Exception(f"GET request {request_url} failed after 5 attempts")
-
-        if not strip_auth:
-            await self.__check_rate_limit(api_response.headers)
-
-        return api_response
+        return await self.__perform_request(
+            "GET", request_url, params=params, strip_auth=strip_auth
+        )
 
     async def call_post(self, url: str, params: dict = None):
         """Internal method to wrap a POST request so that proxies and headers
@@ -363,15 +521,12 @@ class Api:
             Response: Returns the requests response object.
         """
         request_url = self.github_url + url
-        logger.debug(f"Making POST API request to {request_url}!")
-
-        api_response = await self.client.post(request_url, json=params, timeout=30)
+        api_response = await self.__perform_request(
+            "POST", request_url, json=params, timeout=30
+        )
         logger.debug(
             f"The POST request to {request_url} returned a {api_response.status_code}!"
         )
-
-        await self.__check_rate_limit(api_response.headers)
-
         return api_response
 
     async def call_patch(self, url: str, params: dict = None):
@@ -386,15 +541,10 @@ class Api:
             Response: Returns the requests response object.
         """
         request_url = self.github_url + url
-        logger.debug(f"Making PATCH API request to {request_url}!")
-
-        api_response = await self.client.patch(request_url, json=params)
+        api_response = await self.__perform_request("PATCH", request_url, json=params)
         logger.debug(
             f"The PATCH request to {request_url} returned a {api_response.status_code}!"
         )
-
-        await self.__check_rate_limit(api_response.headers)
-
         return api_response
 
     async def call_put(self, url: str, params: dict = None):
@@ -407,12 +557,7 @@ class Api:
         """
         request_url = self.github_url + url
         logger.debug(f"Making PUT API request to {request_url}!")
-
-        api_response = await self.client.put(request_url, json=params)
-
-        await self.__check_rate_limit(api_response.headers)
-
-        return api_response
+        return await self.__perform_request("PUT", request_url, json=params)
 
     async def call_delete(self, url: str):
         """Internal method to wrap a POST request so that proxies and headers
@@ -425,15 +570,10 @@ class Api:
             Response: Returns the requests response object.
         """
         request_url = self.github_url + url
-        logger.debug(f"Making DELETE API request to {request_url}!")
-
-        api_response = await self.client.delete(request_url)
+        api_response = await self.__perform_request("DELETE", request_url)
         logger.debug(
             f"The POST request to {request_url} returned a {api_response.status_code}!"
         )
-
-        await self.__check_rate_limit(api_response.headers)
-
         return api_response
 
     async def delete_repository(self, repo_name: str):

@@ -8,7 +8,7 @@ Before you begin, make sure you have:
 
 1. Installed Gato-X (see [Installation](user-guide/installation.md))
 2. Created a GitHub PAT with appropriate scopes
-3. Set the `GH_TOKEN` environment variable with your PAT
+3. Set the `GH_TOKEN` environment variable with your PAT. You can also provide a comma-separated token pool, and Gato-X will rotate tokens when one is rate-limited.
 
 ## Search For GitHub Actions Vulnerabilities at Scale
 
