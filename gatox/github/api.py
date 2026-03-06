@@ -57,8 +57,10 @@ class Api:
         """
         self.tokens = self.__parse_tokens(pat)
         self.token_resets = dict.fromkeys(self.tokens)
+        self.token_indexes = {token: index for index, token in enumerate(self.tokens)}
         self.active_token_index = 0
         self.pat = self.tokens[self.active_token_index]
+        self.token_lock = asyncio.Lock()
         self.transport = None
         self.verify_ssl = True
         self.base_headers = {
@@ -147,52 +149,60 @@ class Api:
             if reset_at is not None and reset_at <= now:
                 self.token_resets[token] = None
 
-    def __get_next_available_token_index(self) -> int | None:
+    def __get_next_available_token_index(self, start_index: int = None) -> int | None:
         """Find the next token in the pool that is currently usable."""
         self.__clear_expired_resets()
-        token_count = len(self.tokens)
-        if token_count == 1:
-            return 0 if self.token_resets[self.pat] is None else None
+        if start_index is None:
+            start_index = self.active_token_index
 
-        for offset in range(1, token_count + 1):
-            candidate_index = (self.active_token_index + offset) % token_count
+        token_count = len(self.tokens)
+        for offset in range(0, token_count):
+            candidate_index = (start_index + offset) % token_count
             candidate = self.tokens[candidate_index]
             if self.token_resets[candidate] is None:
                 return candidate_index
 
         return None
 
-    async def __wait_for_available_token(self):
-        """Sleep until the earliest token reset has passed."""
-        self.__clear_expired_resets()
-        available_index = self.__get_next_available_token_index()
-        if available_index is not None:
-            self.__set_active_token(available_index)
-            return
+    async def __wait_for_available_token(self, start_index: int = None):
+        """Sleep until the earliest token reset has passed and return a token."""
+        while True:
+            async with self.token_lock:
+                self.__clear_expired_resets()
+                available_index = self.__get_next_available_token_index(start_index)
+                if available_index is not None:
+                    self.__set_active_token(available_index)
+                    return self.tokens[available_index]
 
-        reset_times = [
-            reset for reset in self.token_resets.values() if reset is not None
-        ]
-        if not reset_times:
-            return
+                reset_times = [
+                    reset for reset in self.token_resets.values() if reset is not None
+                ]
 
-        next_reset = min(reset_times)
-        sleep_time = max(
-            0,
-            int(next_reset - datetime.now(timezone.utc).timestamp()) + 1,
-        )
-        sleep_time_mins = str(sleep_time // 60)
+            if not reset_times:
+                return None
 
-        Output.warn(
-            f"Sleeping for {Output.bright(sleep_time_mins + ' minutes')} "
-            "until a GitHub token rate limit resets!"
-        )
-        await asyncio.sleep(sleep_time)
-        self.__clear_expired_resets()
+            next_reset = min(reset_times)
+            sleep_time = max(
+                0,
+                int(next_reset - datetime.now(timezone.utc).timestamp()) + 1,
+            )
+            sleep_time_mins = str(sleep_time // 60)
 
-        available_index = self.__get_next_available_token_index()
-        if available_index is not None:
-            self.__set_active_token(available_index)
+            Output.warn(
+                f"Sleeping for {Output.bright(sleep_time_mins + ' minutes')} "
+                "until a GitHub token rate limit resets!"
+            )
+            await asyncio.sleep(sleep_time)
+
+    async def __acquire_request_token(self) -> str:
+        """Select the next available token for a request."""
+        async with self.token_lock:
+            available_index = self.__get_next_available_token_index()
+            if available_index is not None:
+                self.__set_active_token(available_index)
+                return self.tokens[available_index]
+
+        return await self.__wait_for_available_token()
 
     def __is_rate_limited_response(self, response: httpx.Response) -> bool:
         """Return whether GitHub blocked this request due to rate limiting."""
@@ -211,29 +221,33 @@ class Api:
             return "rate limit" in response_text.lower()
         return False
 
-    async def __handle_rate_limited_response(self, response: httpx.Response) -> bool:
+    async def __handle_rate_limited_response(
+        self, response: httpx.Response, token_used: str
+    ) -> bool:
         """Handle a blocked request by rotating to another token or waiting."""
         if not self.__is_rate_limited_response(response):
             return False
 
         reset_at = self.__parse_reset_timestamp(response.headers)
-        if reset_at is not None:
-            self.token_resets[self.pat] = reset_at
+        async with self.token_lock:
+            if reset_at is not None:
+                self.token_resets[token_used] = reset_at
 
-        next_token_index = self.__get_next_available_token_index()
-        if next_token_index is not None:
-            blocked_token = self.pat
-            self.__set_active_token(next_token_index)
-            logger.warning(
-                "GitHub token hit a rate limit, switching tokens.",
-                extra={
-                    "blocked_token_suffix": blocked_token[-4:],
-                    "active_token_suffix": self.pat[-4:],
-                    "reset_at": reset_at,
-                },
+            blocked_token_index = self.token_indexes[token_used]
+            next_token_index = self.__get_next_available_token_index(
+                (blocked_token_index + 1) % len(self.tokens)
             )
-        else:
-            await self.__wait_for_available_token()
+            if next_token_index is not None:
+                self.__set_active_token(next_token_index)
+                logger.warning(
+                    "GitHub token hit a rate limit, switching tokens.",
+                    extra={
+                        "blocked_token_suffix": token_used[-4:],
+                        "active_token_suffix": self.pat[-4:],
+                        "reset_at": reset_at,
+                    },
+                )
+                return True
 
         return True
 
@@ -250,14 +264,17 @@ class Api:
 
         while attempts < 5 + len(self.tokens):
             attempts += 1
-            if not strip_auth and self.token_resets[self.pat] is not None:
-                await self.__wait_for_available_token()
+            token_used = None
+            if not strip_auth:
+                token_used = await self.__acquire_request_token()
 
             try:
                 logger.debug(f"Making {method} API request to {request_url}!")
                 response = await request_method(
                     request_url,
-                    headers=self.__build_headers(strip_auth=strip_auth),
+                    headers=self.__build_headers(
+                        token=token_used, strip_auth=strip_auth
+                    ),
                     **request_kwargs,
                 )
             except Exception as e:
@@ -267,7 +284,9 @@ class Api:
                 )
                 continue
 
-            if not strip_auth and await self.__handle_rate_limited_response(response):
+            if not strip_auth and await self.__handle_rate_limited_response(
+                response, token_used
+            ):
                 continue
 
             if not strip_auth:

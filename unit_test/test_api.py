@@ -129,6 +129,51 @@ async def test_call_get_rotates_token_pool_on_rate_limit():
     )
 
 
+async def test_rate_limit_marks_token_that_sent_request():
+    """Test rate-limit state is recorded for the request token under concurrency."""
+    test_pat = (
+        "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,"
+        "ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    )
+
+    rate_limited_response = MagicMock()
+    rate_limited_response.status_code = 403
+    rate_limited_response.headers = {
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Reset": "1893456000",
+    }
+    rate_limited_response.text = "API rate limit exceeded"
+
+    success_response = MagicMock()
+    success_response.status_code = 200
+    success_response.headers = {}
+    success_response.text = ""
+
+    mock_client = AsyncMock()
+    abstraction_layer = Api(test_pat, "2022-11-28", client=mock_client)
+
+    async def get_side_effect(*args, **kwargs):
+        auth_header = kwargs["headers"]["Authorization"]
+        if auth_header == "Bearer ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA":
+            abstraction_layer._Api__set_active_token(1)
+            return rate_limited_response
+        return success_response
+
+    mock_client.get.side_effect = get_side_effect
+
+    response = await abstraction_layer.call_get("/user")
+
+    assert response is success_response
+    assert (
+        abstraction_layer.token_resets["ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
+        == 1893456000
+    )
+    assert (
+        abstraction_layer.token_resets["ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"]
+        is None
+    )
+
+
 def test_socks_and_http():
     """Test initializing API abstraction layer with SOCKS and HTTP proxy,
     which should raise a valueerror.
