@@ -22,6 +22,7 @@ These options are available across all commands:
 | Option | Description |
 |--------|-------------|
 | `--log-level` | Set logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
+| `--log-file` | Append CLI output and logging records to a text file |
 | `--socks-proxy`, `-sp` | SOCKS proxy to use for requests in HOST:PORT format |
 | `--http-proxy`, `-p` | HTTPS proxy to use for requests in HOST:PORT format |
 | `--no-color`, `-nc` | Removes all color from output |

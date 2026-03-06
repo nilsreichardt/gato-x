@@ -220,6 +220,57 @@ async def test_cli_invalid_pat(capfd):
     assert "malformed" in err
 
 
+@mock.patch("gatox.cli.cli.Enumerator")
+async def test_cli_log_file_created_when_missing(mock_enumerator, tmp_path):
+    """Test that --log-file creates a new file and writes CLI output."""
+    log_path = tmp_path / "gato.log"
+
+    mock_instance = mock_enumerator.return_value
+    mock_instance.api = mock.MagicMock()
+    mock_instance.api.check_user = AsyncMock(
+        return_value={
+            "user": "testUser",
+            "scopes": ["repo", "workflow"],
+        }
+    )
+    mock_instance.api.get_user_type = AsyncMock(return_value="Organization")
+    mock_instance.enumerate_organization = AsyncMock(return_value={"testOrg": "data"})
+    mock_instance.user_perms = {"user": "testUser", "scopes": ["repo", "workflow"]}
+
+    await cli.cli(
+        ["--log-file", str(log_path), "--no-color", "enumerate", "-t", "test"]
+    )
+
+    assert log_path.exists()
+    contents = log_path.read_text()
+    assert "By @adnanthekhan - github.com/AdnaneKhan/gato-x" in contents
+
+
+@mock.patch("gatox.cli.cli.Enumerator")
+async def test_cli_log_file_appends_across_runs(mock_enumerator, tmp_path):
+    """Test that --log-file appends instead of overwriting existing files."""
+    log_path = tmp_path / "gato.log"
+
+    mock_instance = mock_enumerator.return_value
+    mock_instance.api = mock.MagicMock()
+    mock_instance.api.check_user = AsyncMock(
+        return_value={
+            "user": "testUser",
+            "scopes": ["repo", "workflow"],
+        }
+    )
+    mock_instance.api.get_user_type = AsyncMock(return_value="Organization")
+    mock_instance.enumerate_organization = AsyncMock(return_value={"testOrg": "data"})
+    mock_instance.user_perms = {"user": "testUser", "scopes": ["repo", "workflow"]}
+
+    args = ["--log-file", str(log_path), "--no-color", "enumerate", "-t", "test"]
+    await cli.cli(args)
+    await cli.cli(args)
+
+    contents = log_path.read_text()
+    assert contents.count("By @adnanthekhan - github.com/AdnaneKhan/gato-x") == 2
+
+
 async def test_cli_double_proxy(capfd):
     """Test case where conflicing proxies are provided."""
     with pytest.raises(SystemExit):

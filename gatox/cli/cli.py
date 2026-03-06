@@ -1,4 +1,5 @@
 import argparse
+import builtins
 import logging
 import os
 import re
@@ -24,7 +25,31 @@ from gatox.enumerate.enumerate import Enumerator
 from gatox.enumerate.finegrained_enumeration import FineGrainedEnumerator
 from gatox.models.execution import Execution
 from gatox.search.search import Searcher
-from gatox.util.arg_utils import read_file_and_validate_lines
+from gatox.util.arg_utils import WritablePath, read_file_and_validate_lines
+
+
+class PrintTee:
+    """Mirror stdout prints to an append-only text file."""
+
+    def __init__(self, output: Output):
+        self.output = output
+        self.original_print = builtins.print
+
+    def install(self):
+        """Replace the builtin print with a tee implementation."""
+        builtins.print = self._tee_print
+
+    def uninstall(self):
+        """Restore the original builtin print."""
+        builtins.print = self.original_print
+
+    def _tee_print(self, *args, **kwargs):
+        """Write printed output to stdout and the configured log file."""
+        sep = kwargs.get("sep", " ")
+        end = kwargs.get("end", "\n")
+
+        self.original_print(*args, **kwargs)
+        self.output.append_to_log(sep.join(str(arg) for arg in args) + end)
 
 
 def split_github_tokens(gh_token: str) -> list[str]:
@@ -119,11 +144,18 @@ async def cli(args):
 
     arguments = parser.parse_args(args)
 
-    Output(color=not arguments.no_color)
-    validate_arguments(arguments, parser)
-    print(Output.blue(SPLASH))
+    output = Output(color=not arguments.no_color)
+    output.set_log_file(arguments.log_file)
+    print_tee = PrintTee(output)
 
-    await arguments.func(arguments, subparsers)
+    try:
+        print_tee.install()
+        validate_arguments(arguments, parser)
+        print(Output.blue(SPLASH))
+        await arguments.func(arguments, subparsers)
+    finally:
+        print_tee.uninstall()
+        output.close_log_file()
 
 
 def save_workflow_ymls(output_directory):
@@ -139,7 +171,11 @@ def save_workflow_ymls(output_directory):
 
 
 def validate_arguments(args, parser):
-    logging.basicConfig(level=args.log_level)
+    handlers = [logging.StreamHandler()]
+    if args.log_file:
+        handlers.append(logging.FileHandler(args.log_file, mode="a", encoding="utf-8"))
+
+    logging.basicConfig(level=args.log_level, handlers=handlers, force=True)
 
     # App command has different authentication requirements
     if hasattr(args, "app") and args.app is not None:
@@ -627,6 +663,14 @@ def configure_parser_general(parser):
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         default="CRITICAL",
         required=False,
+    )
+
+    parser.add_argument(
+        "--log-file",
+        help="Append CLI output and logging records to a text file.",
+        metavar="PATH/TO/LOG.txt",
+        required=False,
+        type=WritablePath(),
     )
 
     parser.add_argument(

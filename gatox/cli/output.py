@@ -1,6 +1,7 @@
 import json
 import re
 import textwrap
+from typing import TextIO
 
 from colorama import Fore, Style
 
@@ -44,6 +45,7 @@ class Output(metaclass=Singleton):
     def __init__(self, color: bool = True, suppress: bool = False):
         self.color = color
         self.suppress = suppress
+        self.log_file_handle: TextIO | None = None
 
         self.red_dash = RED_DASH if color else "[-]"
         self.red_explain = RED_EXCLAIM if color else "[!]"
@@ -52,6 +54,35 @@ class Output(metaclass=Singleton):
         self.bright_dash = BRIGHT_DASH if color else "-"
         self.yellow_exclaim = YELLOW_EXCLAIM if color else "[!]"
         self.yellow_dash = YELLOW_DASH if color else "[-]"
+
+    @staticmethod
+    def strip_ansi(text: str) -> str:
+        """Remove ANSI escape sequences from text."""
+        ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+        return ansi_escape.sub("", text)
+
+    def set_log_file(self, filepath: str | None):
+        """Configure a file that receives appended CLI output."""
+        if self.log_file_handle:
+            self.log_file_handle.close()
+            self.log_file_handle = None
+
+        if filepath:
+            self.log_file_handle = open(filepath, "a", encoding="utf-8")
+
+    def append_to_log(self, text: str):
+        """Append text to the configured log file if enabled."""
+        if not self.log_file_handle:
+            return
+
+        self.log_file_handle.write(self.strip_ansi(text))
+        self.log_file_handle.flush()
+
+    def close_log_file(self):
+        """Close the configured log file handle."""
+        if self.log_file_handle:
+            self.log_file_handle.close()
+            self.log_file_handle = None
 
     @classmethod
     def write_json(cls, execution_wrapper, output_json):
