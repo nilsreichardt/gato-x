@@ -48,6 +48,12 @@ class WorkflowGraphBuilder:
 
         return cls._instance
 
+    def reset(self):
+        """Reset graph-construction state for a fresh analysis run."""
+        self.graph.clear()
+        self._action_locks = {}
+        NodeFactory.reset_cache()
+
     async def _get_action_lock(self, repo: str, path: str, ref: str) -> asyncio.Lock:
         """
         Get or create a lock for a specific action identified by repo, path, and ref.

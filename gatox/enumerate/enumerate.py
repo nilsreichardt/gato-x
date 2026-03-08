@@ -84,6 +84,13 @@ class Enumerator:
         self.repo_e = RepositoryEnum(self.api, skip_log)
         self.org_e = OrganizationEnum(self.api)
 
+    @staticmethod
+    async def _reset_analysis_state():
+        """Reset caches and graph state so each enumeration starts clean."""
+        CacheManager().reset()
+        WorkflowGraphBuilder().reset()
+        await DataIngestor.reset_count()
+
     async def __setup_user_info(self):
         """Sets up user/app token information."""
         if not self.user_perms and self.api.is_app_token():
@@ -184,7 +191,9 @@ class Enumerator:
                     "Ensure the repository exists and the user has access."
                 )
 
-    async def enumerate_repo(self, repo_name: str) -> Repository:
+    async def enumerate_repo(
+        self, repo_name: str, reset_state: bool = True
+    ) -> Repository:
         """Enumerate only a single repository. No checks for org-level
         self-hosted runners will be performed in this case.
 
@@ -192,9 +201,14 @@ class Enumerator:
             repo_name (str): Repository name in {Org/Owner}/Repo format.
             large_enum (bool, optional): Whether to only download
             run logs when workflow analysis detects runners. Defaults to False.
+            reset_state (bool, optional): Reset graph/cache state before
+            enumerating. Defaults to True for standalone execution.
         """
         if not await self.__setup_user_info():
             return False
+
+        if reset_state:
+            await self._reset_analysis_state()
 
         repo = CacheManager().get_repository(repo_name)
 
@@ -256,6 +270,8 @@ class Enumerator:
         """
         if not await self.__setup_user_info():
             return False
+
+        await self._reset_analysis_state()
 
         repo_data = await self.api.get_repository(repo_name)
         if not repo_data:
@@ -331,6 +347,8 @@ class Enumerator:
         if not self.user_perms:
             return False
 
+        await self._reset_analysis_state()
+
         if (
             "repo" not in self.user_perms["scopes"]
             and "public_repo" not in self.user_perms["scopes"]
@@ -355,9 +373,6 @@ class Enumerator:
         for org in orgs:
             wrapper = await self.enumerate_organization(org)
             org_wrappers.append(wrapper)
-            # Clear the graph after each organization to avoid
-            # excessive node visits.
-            WorkflowGraphBuilder().graph.clear()
 
         return org_wrappers, repo_wrappers
 
@@ -366,6 +381,8 @@ class Enumerator:
 
         if not await self.__setup_user_info():
             return False
+
+        await self._reset_analysis_state()
 
         repos = await self.api.get_user_repos(user)
 
@@ -395,6 +412,8 @@ class Enumerator:
 
         if not await self.__setup_user_info():
             return False
+
+        await self._reset_analysis_state()
 
         details = await self.api.get_organization_details(org)
 
@@ -512,6 +531,8 @@ class Enumerator:
         if not await self.__setup_user_info():
             return repo_wrappers
 
+        await self._reset_analysis_state()
+
         if len(repo_names) == 0:
             Output.error("The list of repositories was empty!")
             return repo_wrappers
@@ -529,7 +550,7 @@ class Enumerator:
 
         try:
             for repo in repo_names:
-                repo_obj = await self.enumerate_repo(repo)
+                repo_obj = await self.enumerate_repo(repo, reset_state=False)
                 if repo_obj:
                     repo_wrappers.append(repo_obj)
         except KeyboardInterrupt:

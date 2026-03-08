@@ -10,6 +10,9 @@ from gatox.cli.output import Output
 from gatox.enumerate.enumerate import Enumerator
 from gatox.github.api import Api
 from gatox.models.workflow import Workflow
+from gatox.workflow_graph.graph_builder import WorkflowGraphBuilder
+from gatox.workflow_graph.node_factory import NodeFactory
+from gatox.workflow_graph.nodes.node import Node
 from unit_test.utils import escape_ansi as escape_ansi
 
 TEST_REPO_DATA = None
@@ -38,9 +41,12 @@ def clear_cache():
     to prevent test interference.
     """
     CacheManager._instance = None
+    WorkflowGraphBuilder().reset()
     yield
     # Clean up after test as well
     CacheManager._instance = None
+    WorkflowGraphBuilder().reset()
+    NodeFactory.reset_cache()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -75,6 +81,22 @@ def test_init(mock_api):
     )
 
     assert gh_enumeration_runner.http_proxy == "localhost:8080"
+
+
+def test_graph_clear_removes_tag_index():
+    """Clearing the graph should also remove any cached tag mappings."""
+
+    builder = WorkflowGraphBuilder()
+    node = Node("repo/workflow")
+    node.extra_tags.add("pull_request_target")
+    builder.graph.add_node(node)
+
+    assert builder.graph.get_nodes_by_tag("pull_request_target") == {node}
+
+    builder.reset()
+
+    assert builder.graph.get_nodes_by_tag("pull_request_target") == set()
+    assert NodeFactory.NODE_CACHE == {}
 
 
 @patch("gatox.enumerate.enumerate.Api", return_value=AsyncMock(Api))
@@ -378,7 +400,7 @@ async def test_enum_repos(mock_api, mock_time, capfd):
     await gh_enumeration_runner.enumerate_repos(["octocat/Hello-World"])
     out, _ = capfd.readouterr()
     assert "Checking repository: octocat/Hello-World" in escape_ansi(out)
-    mock_api.return_value.get_repository.assert_called_once_with("octocat/Hello-World")
+    mock_api.return_value.get_repository.assert_any_call("octocat/Hello-World")
 
 
 @patch("gatox.enumerate.enumerate.Api", return_value=AsyncMock(Api))

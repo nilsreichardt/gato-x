@@ -35,6 +35,11 @@ class NodeFactory:
     NODE_CACHE = {}
 
     @staticmethod
+    def reset_cache():
+        """Clear the cached node instances used during graph construction."""
+        NodeFactory.NODE_CACHE = {}
+
+    @staticmethod
     def create_repo_node(repo_wrapper: Repository):
         """
         Create a RepoNode for the given repository and cache it.

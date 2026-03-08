@@ -194,3 +194,10 @@ class CacheManager:
 
         json.dump(self._instance.action_cache, output_stream, indent=2)
         output_stream.flush()
+
+    def reset(self) -> None:
+        """Clear all cached repository, workflow, and action state."""
+        self.repo_wf_lookup = {}
+        self.repo_store = {}
+        self.workflow_cache = {}
+        self.action_cache = {}

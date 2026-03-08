@@ -55,6 +55,11 @@ class TaggedGraph(nx.DiGraph):
         self.builder = builder
         self.tags = {}  # Dictionary to map tags to sets of nodes
 
+    def clear(self):
+        """Clear graph structure and the tag index together."""
+        super().clear()
+        self.tags.clear()
+
     async def dfs_to_tag(
         self,
         start_node,
