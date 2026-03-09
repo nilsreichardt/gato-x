@@ -32,14 +32,14 @@ def mock_cache_manager():
 
 
 async def test_find_pwn_requests_no_nodes(mock_graph, mock_api, mock_cache_manager):
-    mock_graph.get_nodes_for_tags.return_value = []
+    mock_graph.get_nodes_by_tag.return_value = []
     with patch.object(VisitorUtils, "add_repo_results"):
         await PwnRequestVisitor.find_pwn_requests(mock_graph, mock_api)
 
 
 async def test_find_pwn_requests_with_nodes(mock_graph, mock_api, mock_cache_manager):
     node = MagicMock()
-    mock_graph.get_nodes_for_tags.return_value = [node]
+    mock_graph.get_nodes_by_tag.side_effect = lambda _tag: [node]
     mock_graph.dfs_to_tag.return_value = [[node]]
 
     with (
@@ -47,7 +47,7 @@ async def test_find_pwn_requests_with_nodes(mock_graph, mock_api, mock_cache_man
         patch.object(VisitorUtils, "add_repo_results"),
     ):
         await PwnRequestVisitor.find_pwn_requests(mock_graph, mock_api)
-        mock_process.assert_called_once()
+        assert mock_process.call_count >= 1
 
 
 async def test_process_single_path_with_permission_check(
@@ -930,7 +930,7 @@ async def test_find_pwn_requests_ignore_workflow_run(
 ):
     """Test find_pwn_requests with ignore_workflow_run=True"""
     node = MagicMock()
-    mock_graph.get_nodes_for_tags.return_value = [node]
+    mock_graph.get_nodes_by_tag.side_effect = lambda _tag: [node]
     mock_graph.dfs_to_tag.return_value = [[node]]
 
     with patch.object(PwnRequestVisitor, "_process_single_path"):
@@ -939,12 +939,16 @@ async def test_find_pwn_requests_ignore_workflow_run(
         )
 
         # Should not include workflow_run in query taglist
-        expected_tags = [
+        expected_tags = {
             "issue_comment",
             "pull_request_target",
             "pull_request_target:labeled",
-        ]
-        mock_graph.get_nodes_for_tags.assert_called_once_with(expected_tags)
+        }
+        called_tags = {
+            call.args[0] for call in mock_graph.get_nodes_by_tag.call_args_list
+        }
+        assert expected_tags.issubset(called_tags)
+        assert "workflow_run" not in called_tags
 
 
 @pytest.mark.asyncio
@@ -953,7 +957,7 @@ async def test_find_pwn_requests_with_dfs_exception(
 ):
     """Test find_pwn_requests handles DFS exceptions gracefully"""
     node = MagicMock()
-    mock_graph.get_nodes_for_tags.return_value = [node]
+    mock_graph.get_nodes_by_tag.side_effect = lambda _tag: [node]
 
     # Mock DFS to raise an exception
     mock_graph.dfs_to_tag.side_effect = Exception("DFS error")
@@ -969,7 +973,7 @@ async def test_find_pwn_requests_with_process_path_exception(
 ):
     """Test find_pwn_requests handles path processing exceptions gracefully"""
     node = MagicMock()
-    mock_graph.get_nodes_for_tags.return_value = [node]
+    mock_graph.get_nodes_by_tag.side_effect = lambda _tag: [node]
     mock_graph.dfs_to_tag.return_value = [[node]]
 
     with patch.object(

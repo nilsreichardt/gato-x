@@ -488,34 +488,24 @@ class Enumerator:
             (ArtifactPoisoningVisitor, "find_artifact_poisoning"),
         ]
 
-        # Create tasks for each visitor
-        async def run_visitor(visitor_class, visitor_method):
+        # Visitors can initialize nodes and mutate graph tags during traversal.
+        # Running them concurrently can make findings non-deterministic.
+        for visitor_class, visitor_method in visitors:
             visitor = visitor_class()
             visitor_func = getattr(visitor, visitor_method)
-
             try:
                 if visitor_class in (PwnRequestVisitor, InjectionVisitor):
-                    return await visitor_func(
+                    results = await visitor_func(
                         WorkflowGraphBuilder().graph, self.api, self.ignore_workflow_run
                     )
                 else:
-                    return await visitor_func(WorkflowGraphBuilder().graph, self.api)
+                    results = await visitor_func(WorkflowGraphBuilder().graph, self.api)
             except Exception as e:
                 logger.error(f"Error in {visitor_class.__name__}: {e}")
-                return None
+                continue
 
-        # Run all visitors concurrently
-        visitor_results = await asyncio.gather(
-            *(run_visitor(v_class, v_method) for v_class, v_method in visitors),
-            return_exceptions=True,
-        )
-
-        # Process results
-        for visitor_class, results in zip(visitors, visitor_results, strict=False):
-            if results and not isinstance(results, Exception):
+            if results:
                 await VisitorUtils.add_repo_results(results, self.api)
-            elif isinstance(results, Exception):
-                logger.error(f"Error in {visitor_class[0].__name__}: {results}")
 
         if not self.skip_log:
             await RunnerVisitor.find_runner_workflows(WorkflowGraphBuilder().graph)

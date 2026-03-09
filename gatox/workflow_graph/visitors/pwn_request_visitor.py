@@ -31,7 +31,9 @@ class PwnRequestVisitor:
     """Visits the graph to find potential Pwn Requests."""
 
     @staticmethod
-    async def _process_single_path(path, graph, api, rule_cache, results):
+    async def _process_single_path(
+        path, graph, api, rule_cache, results, start_trigger=None
+    ):
         """
         Process a single path for potential security issues.
         This method analyzes a given path within the workflow graph to identify and flag
@@ -182,18 +184,22 @@ class PwnRequestVisitor:
                     if repo.is_fork():
                         break
 
-                    # Determine the trigger for this path
-                    path_trigger = None
-                    for tag in tags:
-                        if tag in [
+                    # Determine the trigger for this path.
+                    # When a workflow has multiple trigger tags, iterating a set
+                    # is non-deterministic and can suppress findings randomly.
+                    path_trigger = start_trigger
+                    if not path_trigger:
+                        trigger_order = [
                             "pull_request_target",
                             "pull_request_target:labeled",
                             "issue_comment",
                             "workflow_run",
                             "workflow_dispatch",
-                        ]:
-                            path_trigger = tag
-                            break
+                        ]
+                        for trigger in trigger_order:
+                            if trigger in tags:
+                                path_trigger = trigger
+                                break
 
                     # Check if this specific trigger is excluded
                     if path_trigger and node.excluded(path_trigger):
@@ -250,28 +256,31 @@ class PwnRequestVisitor:
             query_taglist.append("workflow_run")
 
         # Retrieve all repository-related nodes with the specified tags
-        nodes = graph.get_nodes_for_tags(query_taglist)
-        all_paths = []
         results = {}
         rule_cache = {}
 
-        for cn in nodes:
-            try:
-                paths = await graph.dfs_to_tag(cn, "checkout", api)
-                if paths:
-                    all_paths.append(paths)
-            except Exception as e:
-                logger.error(f"Error finding paths for pwn request node: {str(e)}")
-                logger.error(f"Node: {cn}")
-
-        for path_set in all_paths:
-            for path in path_set:
+        for trigger in query_taglist:
+            nodes = graph.get_nodes_by_tag(trigger)
+            for cn in nodes:
                 try:
-                    await PwnRequestVisitor._process_single_path(
-                        path, graph, api, rule_cache, results
-                    )
+                    paths = await graph.dfs_to_tag(cn, "checkout", api)
                 except Exception as e:
-                    logger.warning(f"Error processing path: {str(e)}")
-                    logger.warning(f"Path: {path}")
+                    logger.error(f"Error finding paths for pwn request node: {str(e)}")
+                    logger.error(f"Node: {cn}")
+                    continue
+
+                for path in paths:
+                    try:
+                        await PwnRequestVisitor._process_single_path(
+                            path,
+                            graph,
+                            api,
+                            rule_cache,
+                            results,
+                            start_trigger=trigger,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error processing path: {str(e)}")
+                        logger.warning(f"Path: {path}")
 
         return results
